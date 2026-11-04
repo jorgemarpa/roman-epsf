@@ -1,0 +1,43 @@
+[tool.poetry]
+name = "roman-epsf"
+version = "0.1.0"
+description = "ePSF model construction for Roman WFI detectors"
+authors = ["Jorge Martinez-Palomera <jorgemarpa@ug.uchile.cl>"]
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = "^3.11"
+numpy = ">1.26,<2.4"
+astropy = ">5,<8"
+photutils = ">=2.0"
+scipy = ">=1.10"
+pandas = ">1.5,<3.0"
+
+# roman-cuts is the data-access layer (local editable install or path dep)
+roman-cuts = {git = "https://github.com/jorgemarpa/roman-cuts.git", branch = "romcom"}
+
+# Optional: DQ flag definitions from the Roman pipeline
+roman-datamodels = {version = "^1.0.0", optional = true}
+
+[tool.poetry.extras]
+dq = ["roman-datamodels"]
+all = ["roman-datamodels"]
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^8.0.0"
+ruff = ">=0.5,<0.12"
+mypy = "^1.15.0"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.ruff]
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I"]
+
+[tool.mypy]
+plugins = "numpy.typing.mypy_plugin"
+disable_error_code = ["import-untyped", "index"]
