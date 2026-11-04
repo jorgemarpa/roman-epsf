@@ -61,15 +61,19 @@ def save_model(
 
     # --- Primary HDU: metadata only ----------------------------------------
     phdr = fits.Header()
+    coords = getattr(model, "coords", "polar")
+
     phdr["EPSFMETH"] = ("psfmachine", "ePSF method module")
-    phdr["RMIN"] = (float(model.rmin), "Inner radial limit [native pixels]")
-    phdr["RMAX"] = (float(model.rmax), "Outer radial limit [native pixels]")
-    phdr["CUT_R"] = (float(model.cut_r), "Radial-only cutoff [native pixels]")
-    phdr["NRKNOTS"] = (int(model.n_r_knots), "Number of radial knots")
-    phdr["NPHIKNTS"] = (int(model.n_phi_knots), "Number of azimuthal knots")
+    phdr["COORDS"] = (coords, "Coordinate system: polar or cartesian")
+    phdr["RMIN"] = (float(model.rmin), "Inner radial limit / domain start [native pixels]")
+    phdr["RMAX"] = (float(model.rmax), "Outer radial limit / domain half-width [native pixels]")
+    phdr["CUT_R"] = (float(model.cut_r), "Transition radius [native pixels]")
+    phdr["NRKNOTS"] = (int(model.n_r_knots), "Number of radial / column knots")
+    phdr["NPHIKNTS"] = (int(model.n_phi_knots), "Number of azimuthal knots (0 = cartesian)")
     phdr["DEGREE"] = (int(model.degree), "B-spline degree")
     phdr["NSTARS"] = (int(model.n_stars), "Stars used to build model")
     phdr["NPIXELS"] = (int(model.n_pixels), "Pixels used to fit model")
+    phdr["LOGFIT"] = (bool(model.log_fit), "True if model fitted in log10(flux) space")
 
     if extra_header:
         for k, v in extra_header.items():
@@ -80,21 +84,39 @@ def save_model(
     # --- Extension 1: spline weights ----------------------------------------
     w_hdr = fits.Header()
     w_hdr["EXTNAME"] = "WEIGHTS"
-    w_hdr["COMMENT"] = "Fitted polar B-spline coefficients"
+    w_hdr["COMMENT"] = "Fitted B-spline coefficients"
     weights_hdu = fits.ImageHDU(
         data=np.asarray(model.weights, dtype=np.float64), header=w_hdr
     )
 
-    # --- Extension 2: radial knots ------------------------------------------
-    k_hdr = fits.Header()
-    k_hdr["EXTNAME"] = "R_KNOTS"
-    k_hdr["COMMENT"] = "Radial knot positions [native pixels]"
-    knots_hdu = fits.ImageHDU(
-        data=np.asarray(model.r_knots, dtype=np.float64), header=k_hdr
-    )
+    if coords == "cartesian":
+        # Cartesian: save separate column and row knot arrays
+        ck_hdr = fits.Header()
+        ck_hdr["EXTNAME"] = "COL_KNOTS"
+        ck_hdr["COMMENT"] = "Column-axis knot positions [native pixels]"
+        col_knots_hdu = fits.ImageHDU(
+            data=np.asarray(model.r_knots, dtype=np.float64), header=ck_hdr
+        )
+        rk_hdr = fits.Header()
+        rk_hdr["EXTNAME"] = "ROW_KNOTS"
+        rk_hdr["COMMENT"] = "Row-axis knot positions [native pixels]"
+        row_knots_hdu = fits.ImageHDU(
+            data=np.asarray(model.row_knots, dtype=np.float64), header=rk_hdr
+        )
+        fits.HDUList([primary, weights_hdu, col_knots_hdu, row_knots_hdu]).writeto(
+            out, overwrite=overwrite
+        )
+    else:
+        # Polar: save radial knots only
+        k_hdr = fits.Header()
+        k_hdr["EXTNAME"] = "R_KNOTS"
+        k_hdr["COMMENT"] = "Radial knot positions [native pixels]"
+        knots_hdu = fits.ImageHDU(
+            data=np.asarray(model.r_knots, dtype=np.float64), header=k_hdr
+        )
+        fits.HDUList([primary, weights_hdu, knots_hdu]).writeto(out, overwrite=overwrite)
 
-    fits.HDUList([primary, weights_hdu, knots_hdu]).writeto(out, overwrite=overwrite)
-    log.info("save_model: wrote %s (weights shape %s)", out, model.weights.shape)
+    log.info("save_model: wrote %s (coords=%s, weights shape %s)", out, coords, model.weights.shape)
     return out
 
 
@@ -116,11 +138,23 @@ def load_model(filename: str | Path) -> tuple[PSFMachineModel, fits.Header]:
     with fits.open(filename) as hdul:
         phdr = hdul[0].header.copy()
         weights = np.asarray(hdul["WEIGHTS"].data, dtype=np.float64).copy()
-        r_knots = np.asarray(hdul["R_KNOTS"].data, dtype=np.float64).copy()
+
+        coords = str(phdr.get("COORDS", "polar")).strip().lower()
+
+        if coords == "cartesian":
+            col_knots = np.asarray(hdul["COL_KNOTS"].data, dtype=np.float64).copy()
+            row_knots = np.asarray(hdul["ROW_KNOTS"].data, dtype=np.float64).copy()
+            r_knots = col_knots
+        else:
+            r_knots = np.asarray(hdul["R_KNOTS"].data, dtype=np.float64).copy()
+            col_knots = r_knots
+            row_knots = None
+
+    log_fit = bool(phdr.get("LOGFIT", False))
 
     model = PSFMachineModel(
         weights=weights,
-        r_knots=r_knots,
+        r_knots=col_knots,
         n_r_knots=int(phdr["NRKNOTS"]),
         n_phi_knots=int(phdr["NPHIKNTS"]),
         rmin=float(phdr["RMIN"]),
@@ -129,9 +163,15 @@ def load_model(filename: str | Path) -> tuple[PSFMachineModel, fits.Header]:
         degree=int(phdr["DEGREE"]),
         n_stars=int(phdr.get("NSTARS", 0)),
         n_pixels=int(phdr.get("NPIXELS", 0)),
+        log_fit=log_fit,
+        coords=coords,
+        row_knots=row_knots,
     )
 
-    log.info("load_model: loaded %s (weights shape %s)", filename, weights.shape)
+    log.info(
+        "load_model: loaded %s (coords=%s, weights shape %s)",
+        filename, coords, weights.shape,
+    )
     return model, phdr
 
 

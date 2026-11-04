@@ -22,6 +22,9 @@ __all__ = [
     "_wrapped_spline_matrix",
     "_r_bspline_matrix",
     "_make_design_matrix_polar",
+    "_xy_bspline_matrix",
+    "_cartesian_knots_1d",
+    "_make_design_matrix_cartesian",
     "_solve_linear",
 ]
 
@@ -201,6 +204,138 @@ def _make_design_matrix_polar(
         np.ones((len(r), 1), dtype=float), # global intercept
     ])
     return X1
+
+
+def _xy_bspline_matrix(
+    x: np.ndarray,
+    xmin: float,
+    xmax: float,
+    knots: np.ndarray,
+    degree: int = 3,
+) -> np.ndarray:
+    """Clamped B-spline design matrix for one Cartesian coordinate.
+
+    Equivalent to :func:`_r_bspline_matrix` but for an arbitrary domain
+    ``[xmin, xmax]`` that may include negative values.
+
+    Parameters
+    ----------
+    x : np.ndarray
+        1D array of coordinate values.  All entries should lie in
+        ``[xmin, xmax]``; values outside are clamped by the boundary knots.
+    xmin, xmax : float
+        Domain boundaries (``xmin < xmax``).
+    knots : np.ndarray
+        Interior knot positions (all between ``xmin`` and ``xmax``).
+    degree : int
+        Spline degree.  Default ``3`` (cubic).
+
+    Returns
+    -------
+    np.ndarray
+        Dense matrix of shape ``(len(x), len(knots) + degree + 1)``.
+    """
+    t = np.concatenate([
+        np.repeat(xmin, degree + 1),
+        knots,
+        np.repeat(xmax, degree + 1),
+    ])
+    x_aug = np.concatenate([x, [xmin, xmax]])
+    dm = BSpline.design_matrix(x_aug, t, degree).toarray()
+    return dm[:-2]
+
+
+def _cartesian_knots_1d(
+    dmax: float,
+    n_knots: int,
+    cut_r: float,
+) -> np.ndarray:
+    """Interior knot positions for a 1D B-spline on ``[-dmax, dmax]``.
+
+    Knots within ``(-cut_r, cut_r)`` are sqrt-spaced (denser near 0) to give
+    higher resolution in the PSF core.  Knots outside ``cut_r`` are linearly
+    spaced.
+
+    Parameters
+    ----------
+    dmax : float
+        Domain half-width.  Knots span ``(-dmax, dmax)`` (boundaries excluded).
+    n_knots : int
+        Target number of interior knots.  The actual count may differ by ±1
+        depending on rounding.
+    cut_r : float
+        Transition radius: sqrt-spaced inside, linearly spaced outside.
+
+    Returns
+    -------
+    np.ndarray
+        Sorted 1D array of interior knot positions.
+    """
+    cut_r = min(float(cut_r), dmax * 0.85)  # guard: cut_r must be < dmax
+    inner_frac = cut_r / dmax
+
+    # Allocate knots proportionally: more in the inner (PSF core) region
+    n_inner_half = max(2, int(round(n_knots * inner_frac / 2.0)))
+    n_outer_half = max(1, n_knots // 2 - n_inner_half)
+
+    # Positive inner half: sqrt-spaced on (0, cut_r] — denser near 0
+    inner_pos = np.linspace(0.0, cut_r ** 0.5, n_inner_half + 1)[1:] ** 2
+
+    # Positive outer half: linearly spaced on (cut_r, dmax)
+    outer_pos = np.linspace(cut_r, dmax, n_outer_half + 2)[1:-1]
+
+    knots_pos = np.concatenate([inner_pos, outer_pos])
+    # Mirror to negative side
+    return np.sort(np.concatenate([-knots_pos[::-1], knots_pos]))
+
+
+def _make_design_matrix_cartesian(
+    dc: np.ndarray,
+    dr: np.ndarray,
+    dmax: float,
+    col_knots: np.ndarray,
+    row_knots: np.ndarray,
+    degree: int = 3,
+) -> np.ndarray:
+    """2D Cartesian tensor-product B-spline design matrix.
+
+    Builds the full outer product of two 1D B-spline bases — one along the
+    column offset axis and one along the row offset axis — on the symmetric
+    domain ``[-dmax, dmax]``.
+
+    Sqrt-spaced knots (from :func:`_cartesian_knots_1d`) concentrate basis
+    functions near the PSF centre; the linear solver then assigns near-zero
+    weights to functions that cover the quiet outer region.
+
+    Parameters
+    ----------
+    dc : np.ndarray
+        Column offsets from star centre (native detector pixels).
+    dr : np.ndarray
+        Row offsets from star centre (native detector pixels).
+    dmax : float
+        Domain half-width in native pixels (equal to ``rmax`` in the model).
+    col_knots : np.ndarray
+        Interior knot positions for the column axis.
+    row_knots : np.ndarray
+        Interior knot positions for the row axis.
+    degree : int
+        Spline degree.  Default ``3`` (cubic).
+
+    Returns
+    -------
+    np.ndarray
+        Dense design matrix of shape
+        ``(len(dc), n_col_basis * n_row_basis)`` where
+        ``n_col_basis = len(col_knots) + degree + 1``.
+    """
+    dmin = -dmax
+    col_dm = _xy_bspline_matrix(dc, dmin, dmax, col_knots, degree)  # (N, n_col)
+    row_dm = _xy_bspline_matrix(dr, dmin, dmax, row_knots, degree)  # (N, n_row)
+
+    # Tensor product: col_j * row_k for all (j, k)
+    # Layout: all col functions paired with row_0, then row_1, ...
+    return np.hstack([col_dm * row_dm[:, k : k + 1] for k in range(row_dm.shape[1])])
 
 
 def _solve_linear(

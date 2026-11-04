@@ -169,37 +169,62 @@ class TestBuildPixelArrays:
         )
 
     def test_returns_four_arrays(self):
+        cutout_size = 25
         dc, dr, nf, si = build_pixel_arrays(
-            self.image, None, self.selected, cutout_size=25
+            self.image, None, self.selected, cutout_size=cutout_size
         )
-        assert dc.shape == dr.shape == nf.shape == si.shape
+        n_stars = len(self.selected)
+        n_pix = cutout_size ** 2
+        assert dc.shape == (n_stars, n_pix)
+        assert dr.shape == (n_stars, n_pix)
+        assert nf.shape == (n_stars, n_pix)
+        assert si.shape == (n_stars,)
 
     def test_all_finite(self):
         dc, dr, nf, si = build_pixel_arrays(
             self.image, None, self.selected, cutout_size=25
         )
+        # dc and dr are always filled; nf may have NaN for masked pixels
         assert np.all(np.isfinite(dc))
         assert np.all(np.isfinite(dr))
-        assert np.all(np.isfinite(nf))
 
     def test_star_idx_range(self):
         dc, dr, nf, si = build_pixel_arrays(
             self.image, None, self.selected, cutout_size=25
         )
+        assert si.ndim == 1
         assert si.min() >= 0
         assert si.max() < len(self.selected)
+
+    def test_norm_flux_nan_for_masked(self):
+        """Pixels with bad DQ flags must appear as NaN in norm_flux."""
+        dq = np.zeros(self.image.shape, dtype=np.uint32)
+        # Inject a bad pixel at a known star position
+        star = self.selected.iloc[0]
+        ix = int(round(float(star["x_centroid"])))
+        iy = int(round(float(star["y_centroid"])))
+        dq[iy, ix] = 1  # any non-zero DQ = bad
+        dc, dr, nf, _ = build_pixel_arrays(
+            self.image, dq, self.selected, cutout_size=25
+        )
+        # row 0 corresponds to the first star; centre offset = (0,0)
+        centre_pix = 25 * (25 // 2) + (25 // 2)  # raveled index of offset (0,0)
+        assert np.isnan(nf[0, centre_pix])
 
     def test_local_background_mode(self):
         dc, dr, nf, _ = build_pixel_arrays(
             self.image, None, self.selected, cutout_size=25, background="local"
         )
-        assert np.all(np.isfinite(nf))
+        # dc and dr always finite; nf may be NaN for bad pixels
+        assert np.all(np.isfinite(dc))
+        assert np.all(np.isfinite(dr))
 
     def test_no_background_mode(self):
         dc, dr, nf, _ = build_pixel_arrays(
             self.image, None, self.selected, cutout_size=25, background=None
         )
-        assert np.all(np.isfinite(nf))
+        assert np.all(np.isfinite(dc))
+        assert np.all(np.isfinite(dr))
 
     def test_raises_missing_flux_col(self):
         bad_cat = self.selected.drop(
@@ -354,6 +379,19 @@ class TestFitsIO:
             _, hdr = load_model(path)
             assert hdr.get("FILTER") == "F146"
             assert hdr.get("NSTARS") == 20
+        finally:
+            path.unlink(missing_ok=True)
+
+    def test_logfit_roundtrip(self):
+        """LOGFIT keyword persists through save/load."""
+        with tempfile.NamedTemporaryFile(suffix=".fits", delete=False) as f:
+            path = Path(f.name)
+        try:
+            # model built with default log_fit=True
+            save_model(self.model, path)
+            loaded, hdr = load_model(path)
+            assert loaded.log_fit == self.model.log_fit
+            assert bool(hdr.get("LOGFIT")) == self.model.log_fit
         finally:
             path.unlink(missing_ok=True)
 
