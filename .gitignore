@@ -2,3 +2,4 @@
 src/roman_epsf/psfmachine/__pycache__
 src/roman_epsf/photutils/__pycache__
 src/roman_epsf/__pycache__
+tests/__pycache__

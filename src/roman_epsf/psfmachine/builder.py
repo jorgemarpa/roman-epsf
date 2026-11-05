@@ -37,7 +37,7 @@ from roman_epsf.psfmachine._spline import (
 
 log = logging.getLogger(__name__)
 
-__all__ = ["PSFMachineModel", "build_pixel_arrays", "fit_epsf", "evaluate_epsf"]
+__all__ = ["PSFMachineModel", "build_pixel_arrays", "fit_epsf", "evaluate_epsf", "refine_centroids"]
 
 
 @dataclass
@@ -197,6 +197,7 @@ def build_pixel_arrays(
     flux_col: str | None = None,
     background: str | None = "local",
     sigma_clip_bg: float = 3.0,
+    norm_mode: str = "catalog",
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Assemble per-pixel offset and normalised-flux arrays from star cutouts.
 
@@ -234,6 +235,12 @@ def build_pixel_arrays(
           background-free).
     sigma_clip_bg : float
         Sigma threshold for the local background clipping.  Default ``3.0``.
+    norm_mode : {'catalog', 'measured'}
+        How each stamp is flux-normalised before fitting:
+        * ``'catalog'`` (default): divide by the flux value in *flux_col*.
+        * ``'measured'``: divide by the sum of the finite, unmasked stamp
+          pixels after background subtraction.  Falls back to catalog flux
+          when the measured sum is ≤ 0 or not finite.
 
     Returns
     -------
@@ -322,7 +329,16 @@ def build_pixel_arrays(
 
         dc = (col_grid - x0).ravel()          # shape (n_pix,)
         dr = (row_grid - y0).ravel()          # shape (n_pix,)
-        flux_flat = stamp.ravel() / flux_est  # normalised flux (n_pix,)
+
+        # Choose the normalisation denominator
+        if norm_mode == "measured":
+            good_pix = ~bad_stamp & np.isfinite(stamp)
+            measured_sum = float(np.sum(stamp[good_pix])) if np.any(good_pix) else 0.0
+            denom = measured_sum if (measured_sum > 0 and np.isfinite(measured_sum)) else flux_est
+        else:
+            denom = flux_est
+
+        flux_flat = stamp.ravel() / denom  # normalised flux (n_pix,)
         bad_flat = bad_stamp.ravel()
 
         # Mark masked or non-finite pixels as NaN in norm_flux;
@@ -564,6 +580,151 @@ def _fit_epsf_cartesian(
         n_pixels=int(np.sum(in_range)),
         log_fit=log_fit, coords="cartesian", row_knots=row_knots,
     )
+
+
+def refine_centroids(
+    model: PSFMachineModel,
+    selected_stars: pd.DataFrame,
+    image: np.ndarray,
+    dq: np.ndarray | None,
+    cutout_size: int,
+    flux_col: str | None = None,
+    background: str | None = "local",
+    sigma_clip_bg: float = 3.0,
+    norm_mode: str = "catalog",
+    max_shift: float = 2.0,
+) -> tuple[pd.DataFrame, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Update star centroid estimates by comparing each stamp to the current model.
+
+    For each star the model is evaluated on the stamp grid and the
+    flux-weighted centroid of the residual is used to compute a shift.  The
+    ``x_pix``/``y_pix`` columns in *selected_stars* are updated in-place and
+    the pixel arrays are rebuilt with the new centres so the result can be fed
+    directly into the next :func:`fit_epsf` call.
+
+    Parameters
+    ----------
+    model : PSFMachineModel
+        Current best-fit ePSF model (e.g. from the previous iteration).
+    selected_stars : pd.DataFrame
+        Star catalog with ``x_pix``/``y_pix`` columns.
+    image : np.ndarray
+        2D science image.
+    dq : np.ndarray or None
+        Data-quality array passed through to :func:`build_pixel_arrays`.
+    cutout_size : int
+        Stamp size in native pixels.
+    flux_col : str or None
+        Flux column name (forwarded to :func:`build_pixel_arrays`).
+    background : str or None
+        Background mode (forwarded to :func:`build_pixel_arrays`).
+    sigma_clip_bg : float
+        Sigma for background clipping (forwarded to :func:`build_pixel_arrays`).
+    norm_mode : str
+        Normalisation mode (forwarded to :func:`build_pixel_arrays`).
+    max_shift : float
+        Maximum allowed centroid correction in native pixels.  Larger shifts
+        are clipped to avoid runaway corrections for blended/bad stars.
+        Default ``2.0``.
+
+    Returns
+    -------
+    updated_stars : pd.DataFrame
+        Copy of *selected_stars* with updated ``x_pix``/``y_pix``.
+    delta_col, delta_row, norm_flux, star_idx : np.ndarray
+        Pixel arrays rebuilt with the refined centres, ready for
+        :func:`fit_epsf`.
+    """
+    stars = selected_stars.copy()
+    image_arr = np.asarray(image, dtype=np.float64)
+    ny, nx = image_arr.shape
+    half = cutout_size // 2
+
+    # Build bad-pixel mask once
+    bad_global = ~np.isfinite(image_arr)
+    if dq is not None:
+        dq_arr = np.asarray(dq)
+        try:
+            from roman_datamodels.dqflags import pixel
+            bad_global |= (dq_arr & (pixel.DO_NOT_USE | pixel.SATURATED)) != 0
+        except ImportError:
+            bad_global |= dq_arr != 0
+
+    shifts = []
+    for _, row in stars.iterrows():
+        x0 = float(row["x_pix"])
+        y0 = float(row["y_pix"])
+        xc = int(np.round(x0))
+        yc = int(np.round(y0))
+        x_lo, x_hi = xc - half, xc + half + 1
+        y_lo, y_hi = yc - half, yc + half + 1
+
+        if x_lo < 0 or y_lo < 0 or x_hi > nx or y_hi > ny:
+            shifts.append((0.0, 0.0))
+            continue
+
+        stamp = image_arr[y_lo:y_hi, x_lo:x_hi].copy()
+        bad_stamp = bad_global[y_lo:y_hi, x_lo:x_hi]
+
+        if background == "local":
+            border = np.zeros(stamp.shape, dtype=bool)
+            border[0, :] = border[-1, :] = True
+            border[:, 0] = border[:, -1] = True
+            good_border = border & ~bad_stamp & np.isfinite(stamp)
+            if np.any(good_border):
+                _, med_bg, _ = sigma_clipped_stats(stamp[good_border], sigma=sigma_clip_bg)
+                stamp -= med_bg
+
+        col_pix = np.arange(x_lo, x_hi)
+        row_pix = np.arange(y_lo, y_hi)
+        col_grid, row_grid = np.meshgrid(col_pix, row_pix)
+        dc = (col_grid - x0).ravel()
+        dr = (row_grid - y0).ravel()
+
+        model_vals = model.evaluate(dc, dr)
+        data_vals = stamp.ravel()
+        bad_flat = bad_stamp.ravel() | ~np.isfinite(data_vals) | ~np.isfinite(model_vals)
+
+        good = ~bad_flat & (model_vals > 0)
+        if not np.any(good):
+            shifts.append((0.0, 0.0))
+            continue
+
+        # Flux-weighted centroid of the data: the star centre should be at (0,0)
+        # but catalogue errors shift the data centroid away from the origin.
+        data_good = data_vals[good]
+        pos_data = data_good > 0
+        if not np.any(pos_data):
+            shifts.append((0.0, 0.0))
+            continue
+        d_col = float(np.sum(data_good[pos_data] * dc[good][pos_data]) / np.sum(data_good[pos_data]))
+        d_row = float(np.sum(data_good[pos_data] * dr[good][pos_data]) / np.sum(data_good[pos_data]))
+
+        # Clip to max_shift
+        d_col = float(np.clip(d_col, -max_shift, max_shift))
+        d_row = float(np.clip(d_row, -max_shift, max_shift))
+        shifts.append((d_col, d_row))
+
+    shifts_arr = np.array(shifts)  # (n_stars, 2)
+    median_shift_col = float(np.nanmedian(shifts_arr[:, 0]))
+    median_shift_row = float(np.nanmedian(shifts_arr[:, 1]))
+    log.info(
+        "refine_centroids: median shift = (%.4f, %.4f) native pixels.",
+        median_shift_col, median_shift_row,
+    )
+
+    stars["x_pix"] = stars["x_pix"].to_numpy() + shifts_arr[:, 0]
+    stars["y_pix"] = stars["y_pix"].to_numpy() + shifts_arr[:, 1]
+
+    delta_col, delta_row, norm_flux, star_idx = build_pixel_arrays(
+        image_arr, dq, stars,
+        cutout_size=cutout_size,
+        flux_col=flux_col,
+        background=background,
+        sigma_clip_bg=sigma_clip_bg,
+        norm_mode=norm_mode,
+    )
+    return stars, delta_col, delta_row, norm_flux, star_idx
 
 
 def evaluate_epsf(

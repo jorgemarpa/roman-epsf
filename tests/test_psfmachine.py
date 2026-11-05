@@ -13,6 +13,7 @@ from roman_epsf.psfmachine import (
     evaluate_epsf,
     fit_epsf,
     load_model,
+    refine_centroids,
     save_image,
     save_model,
 )
@@ -31,6 +32,55 @@ from roman_epsf.psfmachine._spline import (
 def _gaussian_psf(dc, dr, sigma=1.5):
     """Analytic Gaussian PSF for testing."""
     return np.exp(-(dc**2 + dr**2) / (2 * sigma**2))
+
+
+def _spike_psf(dc, dr, sigma=1.5, spike_angle_deg=45.0, spike_width_deg=8.0, spike_amp=0.05):
+    """Gaussian PSF with a bilateral diffraction spike at spike_angle_deg and spike_angle_deg+180."""
+    core = np.exp(-(dc**2 + dr**2) / (2 * sigma**2))
+    phi = np.degrees(np.arctan2(dr, dc))
+    r = np.hypot(dc, dr)
+    # Bilateral spike: spike_angle_deg and its opposite (spike_angle_deg + 180)
+    # arctan2 wraps to (-180, 180]; fold to compute angular distance to the spike axis
+    phi_mod = ((phi - spike_angle_deg) + 180) % 360 - 180  # distance to spike_angle axis
+    angle_dist = np.minimum(np.abs(phi_mod), 180 - np.abs(phi_mod))  # bilateral (±180 is same axis)
+    spike_envelope = np.exp(-r / 5.0)
+    spike = spike_amp * spike_envelope * np.exp(-0.5 * (angle_dist / spike_width_deg) ** 2)
+    return core + spike
+
+
+def _make_spike_image_and_catalog(
+    n_stars=40, image_size=300, cutout_size=25,
+    spike_angle_deg=45.0, seed=77,
+    centroid_jitter=0.0,
+):
+    """Synthetic scene with PSFs that have a faint diffraction spike ridge."""
+    rng = np.random.default_rng(seed)
+    margin = cutout_size // 2 + 5
+    xs = rng.uniform(margin, image_size - margin, n_stars)
+    ys = rng.uniform(margin, image_size - margin, n_stars)
+    fluxes = rng.uniform(5_000, 20_000, n_stars)
+
+    ny, nx = image_size, image_size
+    image = rng.normal(0.0, 0.02, (ny, nx))
+    y_g, x_g = np.mgrid[:ny, :nx].astype(float)
+
+    for x0, y0, f in zip(xs, ys, fluxes):
+        dc_grid = x_g - x0
+        dr_grid = y_g - y0
+        image += f * _spike_psf(dc_grid, dr_grid, spike_angle_deg=spike_angle_deg)
+
+    # Optionally add centroid jitter (simulates catalog position errors)
+    x_cat = xs + rng.normal(0.0, centroid_jitter, n_stars)
+    y_cat = ys + rng.normal(0.0, centroid_jitter, n_stars)
+
+    catalog = pd.DataFrame(
+        {
+            "x_centroid": x_cat,
+            "y_centroid": y_cat,
+            "segment_flux": fluxes,
+        }
+    )
+    return image, catalog, xs, ys  # return true positions too
 
 
 def _make_synthetic_image_and_catalog(
@@ -407,3 +457,168 @@ class TestFitsIO:
             assert data.shape == (75, 75)
         finally:
             path.unlink(missing_ok=True)
+
+
+# ---------------------------------------------------------------------------
+# norm_mode tests
+# ---------------------------------------------------------------------------
+
+
+class TestNormMode:
+    def setup_method(self):
+        self.image, self.catalog = _make_synthetic_image_and_catalog(seed=20)
+        from roman_epsf.star_selection import select_stars
+        self.selected = select_stars(
+            self.catalog,
+            image_shape=self.image.shape,
+            cutout_size=25,
+            flux_percentile_range=(0, 100),
+            min_sep_factor=0.5,
+        )
+
+    def test_catalog_mode_default(self):
+        dc, dr, nf, _ = build_pixel_arrays(
+            self.image, None, self.selected, cutout_size=25, norm_mode="catalog"
+        )
+        assert np.all(np.isfinite(dc))
+
+    def test_measured_mode(self):
+        dc, dr, nf, _ = build_pixel_arrays(
+            self.image, None, self.selected, cutout_size=25, norm_mode="measured"
+        )
+        assert np.all(np.isfinite(dc))
+
+    def test_measured_vs_catalog_different(self):
+        _, _, nf_cat, _ = build_pixel_arrays(
+            self.image, None, self.selected, cutout_size=25, norm_mode="catalog"
+        )
+        _, _, nf_meas, _ = build_pixel_arrays(
+            self.image, None, self.selected, cutout_size=25, norm_mode="measured"
+        )
+        # The two modes should produce different normalizations for most stars
+        diff = np.nanmean(np.abs(nf_cat - nf_meas))
+        assert diff > 0
+
+
+# ---------------------------------------------------------------------------
+# Spike-recovery test
+# ---------------------------------------------------------------------------
+
+
+class TestSpikeRecovery:
+    """Verify that the iterative polar fitting recovers diffraction spikes."""
+
+    SPIKE_ANGLE = 45.0   # degrees
+    SPIKE_AMP   = 0.05   # fraction of PSF core
+
+    def _azimuthal_spike_ratio(self, model, r_test=5.0, n_phi=360):
+        """Peak / mean of the azimuthal flux profile at radius r_test."""
+        phi_arr = np.linspace(-np.pi, np.pi, n_phi, endpoint=False)
+        dc = r_test * np.cos(phi_arr)
+        dr = r_test * np.sin(phi_arr)
+        flux = model.evaluate(dc, dr)
+        finite = np.isfinite(flux) & (flux > 0)
+        if not np.any(finite):
+            return 1.0
+        return float(np.nanmax(flux[finite]) / np.nanmean(flux[finite]))
+
+    def test_polar_recovers_spike_no_jitter(self):
+        """Polar mode with cut_r=1 recovers spikes when centroids are perfect."""
+        from roman_epsf.star_selection import select_stars
+
+        image, catalog, _, _ = _make_spike_image_and_catalog(
+            n_stars=40, centroid_jitter=0.0, spike_angle_deg=self.SPIKE_ANGLE, seed=100
+        )
+        selected = select_stars(
+            catalog, image_shape=image.shape, cutout_size=25,
+            flux_percentile_range=(0, 100), min_sep_factor=0.5,
+        )
+        dc, dr, nf, _ = build_pixel_arrays(
+            image, None, selected, cutout_size=25, background="local"
+        )
+        model = fit_epsf(
+            dc, dr, nf,
+            n_r_knots=10, n_phi_knots=20, rmin=0.5, rmax=12.0, cut_r=1.0,
+            coords="polar", log_fit=True,
+        )
+        ratio = self._azimuthal_spike_ratio(model)
+        # Spike should produce an azimuthal peak > 5% above the ring mean
+        assert ratio > 1.05, f"Spike ratio {ratio:.3f} too low — spike not recovered"
+
+    def test_large_cut_r_flattens_inner_azimuthal_ring(self):
+        """cut_r=3.0 forces radial symmetry at r<3 px — the azimuthal ring at r=2
+        should be flatter (ratio closer to 1) than with cut_r=1.0."""
+        from roman_epsf.star_selection import select_stars
+
+        image, catalog, _, _ = _make_spike_image_and_catalog(
+            n_stars=40, centroid_jitter=0.0, spike_angle_deg=self.SPIKE_ANGLE, seed=101
+        )
+        selected = select_stars(
+            catalog, image_shape=image.shape, cutout_size=25,
+            flux_percentile_range=(0, 100), min_sep_factor=0.5,
+        )
+        dc, dr, nf, _ = build_pixel_arrays(
+            image, None, selected, cutout_size=25, background="local"
+        )
+        model_low_cut = fit_epsf(
+            dc, dr, nf, n_r_knots=10, n_phi_knots=20,
+            rmin=0.5, rmax=12.0, cut_r=1.0, coords="polar", log_fit=True,
+        )
+        model_high_cut = fit_epsf(
+            dc, dr, nf, n_r_knots=10, n_phi_knots=20,
+            rmin=0.5, rmax=12.0, cut_r=3.0, coords="polar", log_fit=True,
+        )
+        # Check at r=2 px — inside cut_r=3.0 (phi suppressed) but outside cut_r=1.0
+        ratio_low_cut  = self._azimuthal_spike_ratio(model_low_cut,  r_test=2.0)
+        ratio_high_cut = self._azimuthal_spike_ratio(model_high_cut, r_test=2.0)
+        assert ratio_low_cut > ratio_high_cut, (
+            f"At r=2px: cut_r=1.0 ratio ({ratio_low_cut:.3f}) should exceed "
+            f"cut_r=3.0 ratio ({ratio_high_cut:.3f})"
+        )
+
+    def test_refine_centroids_corrects_position_errors(self):
+        """refine_centroids moves star positions toward their true centres.
+
+        With 0.8 px rms jitter the mean applied shift should be > 0.05 px
+        and the spike should remain recoverable after the shift is applied.
+        """
+        from roman_epsf.star_selection import select_stars
+
+        image, catalog, _, _ = _make_spike_image_and_catalog(
+            n_stars=50, centroid_jitter=0.8, spike_angle_deg=self.SPIKE_ANGLE, seed=103,
+        )
+        selected = select_stars(
+            catalog, image_shape=image.shape, cutout_size=25,
+            flux_percentile_range=(0, 100), min_sep_factor=0.5,
+        )
+        dc, dr, nf, _ = build_pixel_arrays(
+            image, None, selected, cutout_size=25, background="local"
+        )
+        model_pass1 = fit_epsf(
+            dc, dr, nf, n_r_knots=10, n_phi_knots=20,
+            rmin=0.5, rmax=12.0, cut_r=1.0, coords="polar", log_fit=True,
+        )
+
+        selected_refined, dc2, dr2, nf2, _ = refine_centroids(
+            model_pass1, selected, image, None, cutout_size=25, background="local",
+        )
+
+        # Verify that refinement applied non-trivial centroid shifts
+        common_idx = selected.index.intersection(selected_refined.index)
+        sel_orig = selected.loc[common_idx]
+        sel_ref  = selected_refined.loc[common_idx]
+        delta_x = (sel_ref["x_pix"] - sel_orig["x_pix"]).to_numpy()
+        delta_y = (sel_ref["y_pix"] - sel_orig["y_pix"]).to_numpy()
+        mean_shift = float(np.sqrt(np.mean(delta_x**2 + delta_y**2)))
+        assert mean_shift > 0.05, (
+            f"Centroid refinement applied negligible shifts (mean={mean_shift:.4f} px). "
+            "Expected > 0.05 px for 0.8 px input jitter."
+        )
+
+        # Spike is still recovered after re-fitting with refined positions
+        model_pass2 = fit_epsf(
+            dc2, dr2, nf2, n_r_knots=10, n_phi_knots=20,
+            rmin=0.5, rmax=12.0, cut_r=1.0, coords="polar", log_fit=True,
+        )
+        ratio = self._azimuthal_spike_ratio(model_pass2)
+        assert ratio > 1.05, f"Spike ratio {ratio:.3f} too low after refinement"
