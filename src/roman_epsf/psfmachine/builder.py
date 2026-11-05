@@ -26,7 +26,6 @@ from dataclasses import dataclass, field
 
 import numpy as np
 import pandas as pd
-from astropy.stats import sigma_clipped_stats
 
 from roman_epsf.psfmachine._spline import (
     _cartesian_knots_1d,
@@ -38,6 +37,48 @@ from roman_epsf.psfmachine._spline import (
 log = logging.getLogger(__name__)
 
 __all__ = ["PSFMachineModel", "build_pixel_arrays", "fit_epsf", "evaluate_epsf", "refine_centroids"]
+
+
+def _estimate_background(
+    stamp: np.ndarray,
+    bad_mask: np.ndarray,
+    sigma: float = 3.0,
+) -> tuple[float, float]:
+    """Estimate the sky background level and noise RMS of a single stamp.
+
+    Selects pixels within *sigma* × std of the stamp median (excluding
+    bad/non-finite pixels), then returns the median and std of that sky
+    selection.  Returns ``(0.0, 0.0)`` if no sky pixels survive.
+
+    Parameters
+    ----------
+    stamp : np.ndarray
+        2D stamp array (background **not** yet subtracted).
+    bad_mask : np.ndarray of bool
+        Bad-pixel mask, same shape as *stamp*.  ``True`` = do not use.
+    sigma : float
+        Width of the selection window in units of the stamp std.  Default
+        ``3.0``; lower values are more aggressive at excluding source pixels.
+
+    Returns
+    -------
+    level : float
+        Median of the selected sky pixels, or ``0.0`` when none survive.
+    rms : float
+        Standard deviation of the selected sky pixels (background noise
+        estimate), or ``0.0`` when none survive.
+    """
+    good = ~bad_mask & np.isfinite(stamp)
+    if not np.any(good):
+        return 0.0, 0.0
+    vals = stamp[good]
+    med = float(np.median(vals))
+    std = float(np.std(vals))
+    sky = good & (np.abs(stamp - med) <= sigma * std)
+    if not np.any(sky):
+        return 0.0, 0.0
+    sky_vals = stamp[sky]
+    return float(np.median(sky_vals)), float(np.std(sky_vals))
 
 
 @dataclass
@@ -229,18 +270,27 @@ def build_pixel_arrays(
         'aper_flux', 'kron_flux', 'flux']`` is used.
     background : {'local', None}
         Per-cutout background mode:
-        * ``'local'``: subtract a sigma-clipped median estimated from the
-          outer annulus of each stamp.
+        * ``'local'``: subtract the median of stamp pixels that fall within
+          *sigma_clip_bg* × std of the stamp median.  This selects sky-like
+          pixels (i.e. those not dominated by source flux) across the whole
+          stamp rather than just the border ring.
         * ``None``: no per-cutout subtraction (assumes *image* is already
           background-free).
     sigma_clip_bg : float
-        Sigma threshold for the local background clipping.  Default ``3.0``.
-    norm_mode : {'catalog', 'measured'}
+        Number of standard deviations from the stamp median used to define
+        "sky" pixels.  Default ``3.0`` (1-sigma clipping retains only the
+        faint background pixels; increase to be more inclusive).
+    norm_mode : {'catalog', 'measured', 'core'}
         How each stamp is flux-normalised before fitting:
         * ``'catalog'`` (default): divide by the flux value in *flux_col*.
-        * ``'measured'``: divide by the sum of the finite, unmasked stamp
+        * ``'measured'``: divide by the sum of all finite, unmasked stamp
           pixels after background subtraction.  Falls back to catalog flux
           when the measured sum is ≤ 0 or not finite.
+        * ``'core'``: divide by the sum of finite, unmasked pixels within a
+          3 px radius of the star centre.  This avoids inflating the
+          denominator with extended-wing flux and is more robust for PSFs
+          with diffraction spikes.  Falls back to catalog flux when the core
+          sum is ≤ 0 or not finite.
 
     Returns
     -------
@@ -312,15 +362,8 @@ def build_pixel_arrays(
 
         # --- per-cutout local background ------------------------------------
         if background == "local":
-            border = np.zeros(stamp.shape, dtype=bool)
-            border[0, :] = border[-1, :] = True
-            border[:, 0] = border[:, -1] = True
-            good_border = border & ~bad_stamp & np.isfinite(stamp)
-            if np.any(good_border):
-                _, med_bg, _ = sigma_clipped_stats(
-                    stamp[good_border], sigma=sigma_clip_bg
-                )
-                stamp -= med_bg
+            bg_level, _ = _estimate_background(stamp, bad_stamp, sigma=sigma_clip_bg)
+            stamp -= bg_level
 
         # --- pixel coordinate offsets (sub-pixel accurate) ------------------
         col_pix = np.arange(x_lo, x_hi)
@@ -335,6 +378,12 @@ def build_pixel_arrays(
             good_pix = ~bad_stamp & np.isfinite(stamp)
             measured_sum = float(np.sum(stamp[good_pix])) if np.any(good_pix) else 0.0
             denom = measured_sum if (measured_sum > 0 and np.isfinite(measured_sum)) else flux_est
+        elif norm_mode == "core":
+            # Sum pixels within 3 native pixels of the star centre
+            r_stamp = np.hypot(col_grid - x0, row_grid - y0)
+            core_mask = ~bad_stamp & np.isfinite(stamp) & (r_stamp <= 3.0)
+            core_sum = float(np.sum(stamp[core_mask])) if np.any(core_mask) else 0.0
+            denom = core_sum if (core_sum > 0 and np.isfinite(core_sum)) else flux_est
         else:
             denom = flux_est
 
@@ -370,9 +419,9 @@ def fit_epsf(
     delta_col: np.ndarray,
     delta_row: np.ndarray,
     norm_flux: np.ndarray,
-    n_r_knots: int = 12,
+    n_r_knots: int = 18,
     n_phi_knots: int = 15,
-    rmin: float = 0.5,
+    rmin: float = 0.05,
     rmax: float = 13.0,
     cut_r: float = 3.0,
     degree: int = 3,
@@ -414,12 +463,15 @@ def fit_epsf(
     n_r_knots : int
         Polar: number of radial knots (sqrt-spaced in ``[rmin, rmax]``).
         Cartesian: number of knots per axis when *n_col_knots* / *n_row_knots*
-        are not supplied.  Default ``12``.
+        are not supplied.  Default ``18`` (was 12 — increased for better core
+        resolution).
     n_phi_knots : int
         Number of azimuthal knots (polar mode only).  Ignored for Cartesian.
         Default ``15``.
     rmin : float
-        Inner radial limit in detector pixels (polar mode).  Default ``0.5``.
+        Inner radial limit in detector pixels (polar mode).  Default ``0.05``
+        (was 0.5 — reduced so the brightest center pixel is always fitted and
+        evaluated rather than zeroed).
     rmax : float
         Outer radial limit (polar) or domain half-width (Cartesian) in
         detector pixels.  Default ``13.0``.
@@ -667,13 +719,8 @@ def refine_centroids(
         bad_stamp = bad_global[y_lo:y_hi, x_lo:x_hi]
 
         if background == "local":
-            border = np.zeros(stamp.shape, dtype=bool)
-            border[0, :] = border[-1, :] = True
-            border[:, 0] = border[:, -1] = True
-            good_border = border & ~bad_stamp & np.isfinite(stamp)
-            if np.any(good_border):
-                _, med_bg, _ = sigma_clipped_stats(stamp[good_border], sigma=sigma_clip_bg)
-                stamp -= med_bg
+            bg_level, _ = _estimate_background(stamp, bad_stamp, sigma=sigma_clip_bg)
+            stamp -= bg_level
 
         col_pix = np.arange(x_lo, x_hi)
         row_pix = np.arange(y_lo, y_hi)

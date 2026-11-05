@@ -3,3 +3,6 @@ src/roman_epsf/psfmachine/__pycache__
 src/roman_epsf/photutils/__pycache__
 src/roman_epsf/__pycache__
 tests/__pycache__
+notebooks/demo_psfmachine_epsf.ipynb
+notebooks/demo_photutils_epsf.ipynb
+notebooks/build_ePSF.ipynb

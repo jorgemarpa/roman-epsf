@@ -187,8 +187,12 @@ def _make_design_matrix_polar(
     X = np.hstack([phi_dm * r_dm[:, k : k + 1] for k in range(n_r)])
     # shape: (N, n_phi * n_r)
 
-    # Determine cut-off index in r_knots
-    cut_r_int = int(np.where(r_knots <= cut_r)[0].max())
+    # Determine cut-off index in r_knots.
+    # Clamp to >= 2 so the inner pure-radial block r_dm[:, 1:cut_r_int] is
+    # never empty (which would happen when cut_r falls between the first two
+    # knots, leaving the steepest PSF core with only a constant intercept).
+    matches = np.where(r_knots <= cut_r)[0]
+    cut_r_int = max(2, int(matches.max())) if len(matches) >= 2 else 2
 
     # Columns to discard: all phi-modulated terms for r-basis indices < cut_r_int
     cut_cols = set(range(n_phi * cut_r_int))
