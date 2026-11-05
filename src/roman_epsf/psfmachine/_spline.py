@@ -127,9 +127,11 @@ def _r_bspline_matrix(
         r_knots,               # all r_knots treated as interior knots
         np.repeat(rmax, degree + 1),
     ])
+    t = np.sort(np.clip(t, rmin, rmax))
     # Augment r with boundary values so the full knot range is always covered;
-    # these two extra rows are removed at the end (same trick as PSFMachine).
-    r_aug = np.concatenate([r, [rmin, rmax]])
+    # use nextafter at rmax so points on the boundary don't evaluate to zero.
+    r_safe = np.clip(r, rmin, np.nextafter(rmax, rmin))
+    r_aug = np.concatenate([r_safe, [rmin, np.nextafter(rmax, rmin)]])
     dm = BSpline.design_matrix(r_aug, t, degree).toarray()
     return dm[:-2]  # drop the two boundary sentinel rows
 
@@ -172,7 +174,7 @@ def _make_design_matrix_polar(
     -------
     np.ndarray
         Dense design matrix of shape ``(len(r), n_basis)`` where
-        ``n_basis = n_phi_knots * (n_r_basis - cut_r_int) + (cut_r_int - 1) + 1``.
+        ``n_basis = n_phi_knots * (n_r_basis - cut_r_int) + cut_r_int``.
     """
     # Radial basis: (N, n_r_basis)
     r_dm = _r_bspline_matrix(r, rmin, rmax, r_knots, degree)
@@ -188,7 +190,7 @@ def _make_design_matrix_polar(
     # shape: (N, n_phi * n_r)
 
     # Determine cut-off index in r_knots.
-    # Clamp to >= 2 so the inner pure-radial block r_dm[:, 1:cut_r_int] is
+    # Clamp to >= 2 so the inner pure-radial block r_dm[:, 0:cut_r_int] is
     # never empty (which would happen when cut_r falls between the first two
     # knots, leaving the steepest PSF core with only a constant intercept).
     matches = np.where(r_knots <= cut_r)[0]
@@ -199,13 +201,11 @@ def _make_design_matrix_polar(
     keep_cols = np.array(sorted(set(range(X.shape[1])) - cut_cols))
 
     # Reassemble:
-    #   - outer phi×r terms (r > cut_r)
-    #   - inner pure-radial terms (r < cut_r, skipping index 0 = intercept)
-    #   - global intercept column
+    #   - outer phi×r terms (r >= cut_r)
+    #   - inner pure-radial terms (r < cut_r, retaining basis index 0 at rmin)
     X1 = np.hstack([
         X[:, keep_cols],                    # outer: phi × r terms
-        r_dm[:, 1:cut_r_int],              # inner: pure radial (no phi)
-        np.ones((len(r), 1), dtype=float), # global intercept
+        r_dm[:, 0:cut_r_int],              # inner: pure radial (no phi)
     ])
     return X1
 
@@ -244,7 +244,9 @@ def _xy_bspline_matrix(
         knots,
         np.repeat(xmax, degree + 1),
     ])
-    x_aug = np.concatenate([x, [xmin, xmax]])
+    t = np.sort(np.clip(t, xmin, xmax))
+    x_safe = np.clip(x, xmin, np.nextafter(xmax, xmin))
+    x_aug = np.concatenate([x_safe, [xmin, np.nextafter(xmax, xmin)]])
     dm = BSpline.design_matrix(x_aug, t, degree).toarray()
     return dm[:-2]
 

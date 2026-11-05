@@ -141,9 +141,10 @@ class PSFMachineModel:
     degree: int = 3
     n_stars: int = 0
     n_pixels: int = 0
-    log_fit: bool = True
+    log_fit: bool = False
     coords: str = "polar"
     row_knots: np.ndarray | None = field(default=None, repr=False)
+    cutout_size: int | None = field(default=None, repr=False)
     _A_cache: np.ndarray | None = field(default=None, repr=False, compare=False)
 
     def evaluate(
@@ -187,17 +188,21 @@ class PSFMachineModel:
     ) -> np.ndarray:
         r = np.hypot(dc, dr)
         phi = np.arctan2(dr, dc)
-        in_range = (r >= self.rmin) & (r <= self.rmax)
+        # Allow evaluation within model radial boundary (with a small margin
+        # to accommodate sub-pixel phase shifts near corners without dropouts).
+        # Points inside rmin are evaluated at rmin to avoid a central zero-hole.
+        in_range = r <= (self.rmax + 0.5)
         result = np.zeros_like(r)
         if np.any(in_range):
+            r_clamped = np.clip(r[in_range], self.rmin, self.rmax)
             A = _make_design_matrix_polar(
-                r[in_range], phi[in_range],
+                r_clamped, phi[in_range],
                 self.rmin, self.rmax,
                 self.r_knots, self.n_phi_knots, self.cut_r, self.degree,
             )
             vals = A @ self.weights
             if self.log_fit:
-                vals = 10.0 ** vals
+                vals = 10.0 ** np.clip(vals, -30.0, 30.0)
             if clip_negative:
                 vals = np.clip(vals, 0.0, None)
             result[in_range] = vals
@@ -223,7 +228,7 @@ class PSFMachineModel:
             )
             vals = A @ self.weights
             if self.log_fit:
-                vals = 10.0 ** vals
+                vals = 10.0 ** np.clip(vals, -30.0, 30.0)
             if clip_negative:
                 vals = np.clip(vals, 0.0, None)
             result[in_range] = vals
@@ -422,7 +427,7 @@ def fit_epsf(
     n_r_knots: int = 18,
     n_phi_knots: int = 15,
     rmin: float = 0.05,
-    rmax: float = 13.0,
+    rmax: float | None = None,
     cut_r: float = 3.0,
     degree: int = 3,
     prior_sigma: float | None = 1e3,
@@ -430,7 +435,8 @@ def fit_epsf(
     coords: str = "polar",
     n_col_knots: int | None = None,
     n_row_knots: int | None = None,
-    log_fit: bool = True,
+    log_fit: bool = False,
+    cutout_size: int | None = None,
 ) -> PSFMachineModel:
     """Fit a B-spline ePSF model to normalised pixel data.
 
@@ -463,8 +469,7 @@ def fit_epsf(
     n_r_knots : int
         Polar: number of radial knots (sqrt-spaced in ``[rmin, rmax]``).
         Cartesian: number of knots per axis when *n_col_knots* / *n_row_knots*
-        are not supplied.  Default ``18`` (was 12 — increased for better core
-        resolution).
+        are not supplied.  Default ``24`` (increased for sharp Roman WFI core).
     n_phi_knots : int
         Number of azimuthal knots (polar mode only).  Ignored for Cartesian.
         Default ``15``.
@@ -472,9 +477,12 @@ def fit_epsf(
         Inner radial limit in detector pixels (polar mode).  Default ``0.05``
         (was 0.5 — reduced so the brightest center pixel is always fitted and
         evaluated rather than zeroed).
-    rmax : float
+    rmax : float or None
         Outer radial limit (polar) or domain half-width (Cartesian) in
-        detector pixels.  Default ``13.0``.
+        detector pixels.  When ``None`` (default), auto-computed to cover the
+        full input pixel grid including all four corners:
+        ``sqrt(2) * (cutout_size/2 + 0.5)`` if *cutout_size* is known or
+        inferred from 2D inputs, otherwise ``max(hypot(delta_col, delta_row))``.
     cut_r : float
         Polar: radius inside which only radial terms are modelled.
         Cartesian: transition radius from sqrt-spaced to linear knots.
@@ -494,11 +502,17 @@ def fit_epsf(
     n_row_knots : int or None
         Cartesian: number of row-axis knots.  Defaults to *n_r_knots*.
     log_fit : bool
-        When ``True`` (default), fit ``log₁₀(norm_flux)`` instead of raw flux.
-        Improves numerical stability because normalised pixel fluxes are
-        ``O(10⁻³)`` or smaller.  Pixels with ``norm_flux ≤ 0`` are excluded
-        automatically.  :meth:`~PSFMachineModel.evaluate` transforms back to
-        linear flux via ``10 ** (A @ weights)``.
+        When ``False`` (default), fits directly in linear flux space.  This
+        preserves the arithmetic mean of the flux distribution and avoids
+        Jensen's inequality underestimation in the core.
+        When ``True``, fit ``log₁₀(norm_flux)``.  Pixels with
+        ``norm_flux ≤ 0`` are excluded automatically.
+        :meth:`~PSFMachineModel.evaluate` transforms back to linear flux
+        via ``10 ** (A @ weights)``.
+    cutout_size : int or None
+        Stamp size in native detector pixels.  When provided (or inferred from
+        2D *delta_col* input), saved in the model and used to auto-calculate
+        *rmax* to cover the entire square grid including corners.
 
     Returns
     -------
@@ -511,8 +525,13 @@ def fit_epsf(
     if coords not in ("polar", "cartesian"):
         raise ValueError(f"coords must be 'polar' or 'cartesian', got {coords!r}.")
 
+    # Infer cutout_size from 2D input if not explicitly provided
+    dc_raw = np.asarray(delta_col, dtype=float)
+    if cutout_size is None and dc_raw.ndim == 2:
+        cutout_size = int(round(np.sqrt(dc_raw.shape[1])))
+
     # Accept both 1D (n_pixels,) and 2D (n_stars, n_pixels_per_star) inputs
-    dc = np.asarray(delta_col, dtype=float).ravel()
+    dc = dc_raw.ravel()
     dr = np.asarray(delta_row, dtype=float).ravel()
     nf = np.asarray(norm_flux, dtype=float).ravel()
     err_flat = (
@@ -520,13 +539,27 @@ def fit_epsf(
         if norm_flux_err is not None else None
     )
 
+    # Auto-compute rmax to cover entire grid including corners if not specified
+    if rmax is None:
+        if cutout_size is not None:
+            if coords == "polar":
+                rmax = float(np.hypot(cutout_size / 2.0 + 0.5, cutout_size / 2.0 + 0.5))
+            else:
+                rmax = float(cutout_size / 2.0 + 0.5)
+        else:
+            if coords == "polar":
+                r_all = np.hypot(dc, dr)
+                rmax = float(np.nanmax(r_all))
+            else:
+                rmax = float(max(np.nanmax(np.abs(dc)), np.nanmax(np.abs(dr))))
+
     if coords == "polar":
         return _fit_epsf_polar(
             dc, dr, nf,
             n_r_knots=n_r_knots, n_phi_knots=n_phi_knots,
             rmin=rmin, rmax=rmax, cut_r=cut_r, degree=degree,
             prior_sigma=prior_sigma, norm_flux_err=err_flat,
-            log_fit=log_fit,
+            log_fit=log_fit, cutout_size=cutout_size,
         )
 
     # --- Cartesian branch ----------------------------------------------------
@@ -537,7 +570,7 @@ def fit_epsf(
         n_col_knots=_n_col, n_row_knots=_n_row,
         rmax=rmax, cut_r=cut_r, degree=degree,
         prior_sigma=prior_sigma, norm_flux_err=err_flat,
-        log_fit=log_fit,
+        log_fit=log_fit, cutout_size=cutout_size,
     )
 
 
@@ -554,6 +587,7 @@ def _fit_epsf_polar(
     prior_sigma: float | None,
     norm_flux_err: np.ndarray | None,
     log_fit: bool,
+    cutout_size: int | None = None,
 ) -> PSFMachineModel:
     r = np.hypot(dc, dr)
     phi = np.arctan2(dr, dc)
@@ -568,6 +602,8 @@ def _fit_epsf_polar(
         )
 
     r_knots = np.linspace(rmin ** 0.5, rmax ** 0.5, n_r_knots) ** 2
+    r_knots[0] = rmin
+    r_knots[-1] = rmax
     y = np.log10(nf[in_range]) if log_fit else nf[in_range]
 
     A = _make_design_matrix_polar(
@@ -586,6 +622,7 @@ def _fit_epsf_polar(
         rmin=rmin, rmax=rmax, cut_r=cut_r, degree=degree,
         n_pixels=int(np.sum(in_range)),
         log_fit=log_fit, coords="polar", row_knots=None,
+        cutout_size=cutout_size,
     )
 
 
@@ -601,6 +638,7 @@ def _fit_epsf_cartesian(
     prior_sigma: float | None,
     norm_flux_err: np.ndarray | None,
     log_fit: bool,
+    cutout_size: int | None = None,
 ) -> PSFMachineModel:
     in_range = (np.abs(dc) <= rmax) & (np.abs(dr) <= rmax) & np.isfinite(nf)
     if log_fit:
@@ -631,6 +669,7 @@ def _fit_epsf_cartesian(
         rmin=-rmax, rmax=rmax, cut_r=cut_r, degree=degree,
         n_pixels=int(np.sum(in_range)),
         log_fit=log_fit, coords="cartesian", row_knots=row_knots,
+        cutout_size=cutout_size,
     )
 
 
@@ -644,6 +683,7 @@ def refine_centroids(
     background: str | None = "local",
     sigma_clip_bg: float = 3.0,
     norm_mode: str = "catalog",
+    core_radius: float = 3.0,
     max_shift: float = 2.0,
 ) -> tuple[pd.DataFrame, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Update star centroid estimates by comparing each stamp to the current model.
@@ -674,6 +714,11 @@ def refine_centroids(
         Sigma for background clipping (forwarded to :func:`build_pixel_arrays`).
     norm_mode : str
         Normalisation mode (forwarded to :func:`build_pixel_arrays`).
+    core_radius : float
+        Aperture radius in native pixels within which data pixels are used to
+        compute the centroid shift.  Default ``3.0``.  Restricting centroiding
+        to the high-SNR core prevents faint outer wing noise and asymmetries
+        from exerting lever-arm torque and smearing the ensemble core peak.
     max_shift : float
         Maximum allowed centroid correction in native pixels.  Larger shifts
         are clipped to avoid runaway corrections for blended/bad stars.
@@ -727,25 +772,23 @@ def refine_centroids(
         col_grid, row_grid = np.meshgrid(col_pix, row_pix)
         dc = (col_grid - x0).ravel()
         dr = (row_grid - y0).ravel()
+        r = np.hypot(dc, dr)
 
-        model_vals = model.evaluate(dc, dr)
         data_vals = stamp.ravel()
-        bad_flat = bad_stamp.ravel() | ~np.isfinite(data_vals) | ~np.isfinite(model_vals)
+        bad_flat = bad_stamp.ravel() | ~np.isfinite(data_vals)
+        if model is not None:
+            model_vals = model.evaluate(dc, dr)
+            bad_flat |= ~np.isfinite(model_vals)
 
-        good = ~bad_flat & (model_vals > 0)
+        # Restrict centroiding to the core window (r <= core_radius) with positive flux
+        good = ~bad_flat & (r <= core_radius) & (data_vals > 0)
         if not np.any(good):
             shifts.append((0.0, 0.0))
             continue
 
-        # Flux-weighted centroid of the data: the star centre should be at (0,0)
-        # but catalogue errors shift the data centroid away from the origin.
-        data_good = data_vals[good]
-        pos_data = data_good > 0
-        if not np.any(pos_data):
-            shifts.append((0.0, 0.0))
-            continue
-        d_col = float(np.sum(data_good[pos_data] * dc[good][pos_data]) / np.sum(data_good[pos_data]))
-        d_row = float(np.sum(data_good[pos_data] * dr[good][pos_data]) / np.sum(data_good[pos_data]))
+        # Flux-weighted centroid in core aperture: star centre should be at (0, 0)
+        d_col = float(np.sum(data_vals[good] * dc[good]) / np.sum(data_vals[good]))
+        d_row = float(np.sum(data_vals[good] * dr[good]) / np.sum(data_vals[good]))
 
         # Clip to max_shift
         d_col = float(np.clip(d_col, -max_shift, max_shift))
@@ -776,7 +819,7 @@ def refine_centroids(
 
 def evaluate_epsf(
     model: PSFMachineModel,
-    cutout_size: int = 25,
+    cutout_size: int | None = None,
     oversampling: int = 4,
     x_0: float = 0.0,
     y_0: float = 0.0,
@@ -788,13 +831,16 @@ def evaluate_epsf(
     The grid is centred at ``(x_0, y_0)`` (sub-pixel offset from the nearest
     detector pixel centre) and spans ``cutout_size`` native pixels in each
     dimension sampled at ``oversampling`` times the native pixel spacing.
+    The evaluation covers the entire square pixel grid including all four
+    corners.
 
     Parameters
     ----------
     model : PSFMachineModel
         Fitted B-spline ePSF model.
-    cutout_size : int
-        Stamp size in native detector pixels.  Default ``25``.
+    cutout_size : int or None
+        Stamp size in native detector pixels.  Defaults to *model.cutout_size*
+        if set on the model, otherwise ``25``.
     oversampling : int
         Oversampling factor (number of sub-pixels per native pixel).
         Default ``4``.
@@ -815,6 +861,9 @@ def evaluate_epsf(
         2D oversampled ePSF image of shape
         ``(cutout_size * oversampling, cutout_size * oversampling)``.
     """
+    if cutout_size is None:
+        cutout_size = model.cutout_size if getattr(model, "cutout_size", None) is not None else 25
+
     half = cutout_size / 2.0
     n_out = cutout_size * oversampling
 

@@ -74,6 +74,8 @@ def save_model(
     phdr["NSTARS"] = (int(model.n_stars), "Stars used to build model")
     phdr["NPIXELS"] = (int(model.n_pixels), "Pixels used to fit model")
     phdr["LOGFIT"] = (bool(model.log_fit), "True if model fitted in log10(flux) space")
+    if getattr(model, "cutout_size", None) is not None:
+        phdr["CUTSIZE"] = (int(model.cutout_size), "Stamp size [native pixels]")
 
     if extra_header:
         for k, v in extra_header.items():
@@ -151,6 +153,7 @@ def load_model(filename: str | Path) -> tuple[PSFMachineModel, fits.Header]:
             row_knots = None
 
     log_fit = bool(phdr.get("LOGFIT", False))
+    cutout_size = int(phdr["CUTSIZE"]) if "CUTSIZE" in phdr else None
 
     model = PSFMachineModel(
         weights=weights,
@@ -166,6 +169,7 @@ def load_model(filename: str | Path) -> tuple[PSFMachineModel, fits.Header]:
         log_fit=log_fit,
         coords=coords,
         row_knots=row_knots,
+        cutout_size=cutout_size,
     )
 
     log.info(
@@ -178,7 +182,7 @@ def load_model(filename: str | Path) -> tuple[PSFMachineModel, fits.Header]:
 def save_image(
     model: PSFMachineModel,
     filename: str | Path,
-    cutout_size: int = 25,
+    cutout_size: int | None = None,
     oversampling: int = 4,
     x_0: float = 0.0,
     y_0: float = 0.0,
@@ -198,8 +202,9 @@ def save_image(
         Fitted polar B-spline ePSF model.
     filename : str or Path
         Output FITS file path.
-    cutout_size : int
-        Stamp size in native detector pixels.  Default ``25``.
+    cutout_size : int or None
+        Stamp size in native detector pixels.  Defaults to *model.cutout_size*
+        if present, otherwise ``25``.
     oversampling : int
         Oversampling factor.  Default ``4``.
     x_0, y_0 : float
@@ -218,6 +223,9 @@ def save_image(
     Path
         Resolved path of the written file.
     """
+    if cutout_size is None:
+        cutout_size = model.cutout_size if getattr(model, "cutout_size", None) is not None else 25
+
     psf_img = evaluate_epsf(
         model,
         cutout_size=cutout_size,

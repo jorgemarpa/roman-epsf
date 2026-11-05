@@ -372,6 +372,58 @@ class TestEvaluateEpsf:
         assert abs(cy - h // 2) < h * 0.1
         assert abs(cx - w // 2) < w * 0.1
 
+    def test_full_grid_coverage_no_zeros(self):
+        # When fitted with auto rmax (covering corners), evaluation must have 0 zeros
+        image, catalog = _make_synthetic_image_and_catalog(seed=7)
+        from roman_epsf.star_selection import select_stars
+        selected = select_stars(
+            catalog,
+            image_shape=image.shape,
+            cutout_size=25,
+            flux_percentile_range=(0, 100),
+            min_sep_factor=0.5,
+        )
+        dc, dr, nf, _ = build_pixel_arrays(image, None, selected, cutout_size=25)
+        model = fit_epsf(dc, dr, nf, cutout_size=25, coords="polar", log_fit=True)
+        assert model.rmax >= np.hypot(12.5, 12.5)
+
+        img = evaluate_epsf(model, oversampling=4)
+        assert img.shape == (100, 100)
+        # All pixels including corners should be strictly positive (no zero circular mask)
+        assert np.all(img > 0)
+        assert np.sum(img == 0) == 0
+
+    def test_subpixel_phase_coverage(self):
+        image, catalog = _make_synthetic_image_and_catalog(seed=8)
+        from roman_epsf.star_selection import select_stars
+        selected = select_stars(
+            catalog,
+            image_shape=image.shape,
+            cutout_size=25,
+            flux_percentile_range=(0, 100),
+            min_sep_factor=0.5,
+        )
+        dc, dr, nf, _ = build_pixel_arrays(image, None, selected, cutout_size=25)
+        model = fit_epsf(dc, dr, nf, cutout_size=25, coords="polar", log_fit=True)
+
+        for x0, y0 in [(0.0, 0.0), (0.25, 0.0), (0.0, 0.25), (0.5, 0.5), (-0.5, -0.5)]:
+            img = evaluate_epsf(model, oversampling=4, x_0=x0, y_0=y0)
+            assert np.all(img > 0), f"Zero pixels found at phase ({x0}, {y0})"
+
+    def test_fit_epsf_auto_rmax(self):
+        dc = np.array([-12.0, 12.0, -12.0, 12.0])
+        dr = np.array([-12.0, -12.0, 12.0, 12.0])
+        nf = np.array([1e-3, 1e-3, 1e-3, 1e-3])
+        # From 1D coords without cutout_size
+        model_1d = fit_epsf(dc, dr, nf, n_r_knots=5, n_phi_knots=4, cut_r=1.0, coords="polar")
+        np.testing.assert_allclose(model_1d.rmax, np.hypot(12.0, 12.0), rtol=1e-4)
+
+        # With cutout_size
+        model_cs = fit_epsf(dc, dr, nf, cutout_size=25, n_r_knots=5, n_phi_knots=4, cut_r=1.0, coords="polar")
+        expected_rmax = np.hypot(25 / 2.0 + 0.5, 25 / 2.0 + 0.5)
+        np.testing.assert_allclose(model_cs.rmax, expected_rmax, rtol=1e-4)
+        assert model_cs.cutout_size == 25
+
 
 # ---------------------------------------------------------------------------
 # FITS I/O tests
@@ -404,6 +456,21 @@ class TestFitsIO:
             assert loaded.rmax == self.model.rmax
             assert loaded.n_r_knots == self.model.n_r_knots
             assert loaded.n_phi_knots == self.model.n_phi_knots
+        finally:
+            path.unlink(missing_ok=True)
+
+    def test_cutout_size_roundtrip(self):
+        self.model.cutout_size = 25
+        with tempfile.NamedTemporaryFile(suffix=".fits", delete=False) as f:
+            path = Path(f.name)
+        try:
+            save_model(self.model, path)
+            loaded, hdr = load_model(path)
+            assert loaded.cutout_size == 25
+            assert hdr["CUTSIZE"] == 25
+            # evaluate_epsf defaults to model.cutout_size
+            img = evaluate_epsf(loaded)
+            assert img.shape == (100, 100)
         finally:
             path.unlink(missing_ok=True)
 
@@ -622,3 +689,88 @@ class TestSpikeRecovery:
         )
         ratio = self._azimuthal_spike_ratio(model_pass2)
         assert ratio > 1.05, f"Spike ratio {ratio:.3f} too low after refinement"
+
+    def test_polar_design_matrix_partition_of_unity(self):
+        """Polar design matrix forms an exact partition of unity across all r and phi."""
+        rmin = 0.05
+        rmax = 18.0
+        r_knots = np.linspace(rmin**0.5, rmax**0.5, 20)**2
+        r_knots[0] = rmin
+        r_knots[-1] = rmax
+
+        r = np.linspace(rmin, rmax - 1e-6, 200)
+        phi = np.linspace(-np.pi, np.pi, 200)
+        A = _make_design_matrix_polar(r, phi, rmin, rmax, r_knots, n_phi_knots=16, cut_r=1.5)
+        row_sums = np.sum(A, axis=1)
+        np.testing.assert_allclose(row_sums, 1.0, atol=1e-10)
+
+    def test_linear_fit_core_residuals_unbiased(self):
+        """Linear fit (log_fit=False) yields balanced, unbiased residuals in the core."""
+        from roman_epsf.star_selection import select_stars
+
+        image, catalog, _, _ = _make_spike_image_and_catalog(
+            n_stars=40, centroid_jitter=0.0, spike_angle_deg=self.SPIKE_ANGLE, seed=77,
+        )
+        selected = select_stars(
+            catalog, image_shape=image.shape, cutout_size=25,
+            flux_percentile_range=(0, 100), min_sep_factor=0.5,
+        )
+        dc, dr, nf, _ = build_pixel_arrays(
+            image, None, selected, cutout_size=25, background="local",
+        )
+        model = fit_epsf(
+            dc, dr, nf, n_r_knots=20, n_phi_knots=20,
+            rmin=0.05, cut_r=1.5, coords="polar", log_fit=False, cutout_size=25,
+        )
+
+        core_diffs = []
+        for i in range(len(dc)):
+            valid = np.isfinite(nf[i])
+            dc_s = dc[i][valid]
+            dr_s = dr[i][valid]
+            nf_s = nf[i][valid]
+            pred_s = model.evaluate(dc_s, dr_s)
+            s = float(np.sum(nf_s * pred_s) / np.sum(pred_s**2))
+            r = np.hypot(dc_s, dr_s)
+            c = r < 1.0
+            core_diffs.extend(nf_s[c] - s * pred_s[c])
+
+        diffs = np.array(core_diffs)
+        # Unbiased: mean residual in core is near 0 (< 1e-3)
+        assert abs(np.mean(diffs)) < 1e-3, f"Core residual mean too high: {np.mean(diffs):.4e}"
+
+    def test_refine_centroids_core_window_improves_accuracy(self):
+        """Compact core windowing in refine_centroids prevents wing noise smearing."""
+        from roman_epsf.star_selection import select_stars
+
+        image, catalog, true_xs, true_ys = _make_spike_image_and_catalog(
+            n_stars=30, centroid_jitter=0.1, spike_angle_deg=self.SPIKE_ANGLE, seed=99,
+        )
+        selected = select_stars(
+            catalog, image_shape=image.shape, cutout_size=25,
+            flux_percentile_range=(0, 100), min_sep_factor=0.5,
+        )
+        idxs = selected.index.to_numpy()
+        err_init = np.mean(np.hypot(
+            selected["x_pix"].to_numpy() - true_xs[idxs],
+            selected["y_pix"].to_numpy() - true_ys[idxs],
+        ))
+
+        dc, dr, nf, _ = build_pixel_arrays(
+            image, None, selected, cutout_size=25, background="local",
+        )
+        m0 = fit_epsf(
+            dc, dr, nf, n_r_knots=18, n_phi_knots=16,
+            rmin=0.05, cut_r=1.5, coords="polar", log_fit=False, cutout_size=25,
+        )
+
+        sel_ref, _, _, _, _ = refine_centroids(
+            m0, selected, image, None, cutout_size=25, background="local", core_radius=3.0,
+        )
+        err_refined = np.mean(np.hypot(
+            sel_ref["x_pix"].to_numpy() - true_xs[idxs],
+            sel_ref["y_pix"].to_numpy() - true_ys[idxs],
+        ))
+
+        # Centroid error should be noticeably reduced
+        assert err_refined < err_init, f"Refinement did not improve centroids: {err_refined:.4f} vs {err_init:.4f}"
