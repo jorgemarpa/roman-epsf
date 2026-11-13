@@ -7,7 +7,7 @@ readme = "README.md"
 
 [tool.poetry.dependencies]
 python = "^3.11"
-numpy = ">1.26,<2.4"
+numpy = ">1.26,<2.5"
 astropy = ">5,<8"
 photutils = ">=2.0"
 scipy = ">=1.10"
