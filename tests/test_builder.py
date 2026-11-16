@@ -7,11 +7,14 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from photutils.psf import ImagePSF
+
 from roman_epsf import (
     GridEPSF,
     build_global_epsf,
     build_grid_epsf,
     build_multiepoch_epsf,
+    create_stpsf_epsf,
     load_epsf,
     save_epsf,
 )
@@ -78,8 +81,9 @@ class TestBuildGlobalEpsf:
 
     def test_output_shape(self):
         epsf, _, _ = self._build()
-        # photutils EPSFBuilder output size = cutout_size * oversampling - (oversampling - 1)
-        expected = self.cutout_size * self.oversampling - (self.oversampling - 1)
+        expected = self.cutout_size * self.oversampling
+        if expected % 2 == 0:
+            expected += 1
         assert epsf.data.shape == (expected, expected)
 
     def test_global_background_mode(self):
@@ -96,6 +100,71 @@ class TestBuildGlobalEpsf:
     def test_no_background_mode(self):
         epsf, _, _ = self._build(background=None)
         assert np.isfinite(epsf.data).all()
+
+    def test_initial_epsf_false(self):
+        epsf, _, _ = self._build(initial_epsf=False)
+        assert epsf is not None
+        assert np.isfinite(epsf.data).all()
+
+    def test_initial_epsf_custom_imagepsf(self):
+        expected_size = self.cutout_size * self.oversampling
+        if expected_size % 2 == 0:
+            expected_size += 1
+        # Create a synthetic normalized Gaussian ImagePSF
+        y, x = np.mgrid[:expected_size, :expected_size].astype(np.float64)
+        c = (expected_size - 1) / 2.0
+        synth_data = np.exp(-((x - c) ** 2 + (y - c) ** 2) / (2.0 * (2.0 * self.oversampling) ** 2))
+        synth_data /= synth_data.sum()
+
+        custom_epsf = ImagePSF(synth_data, oversampling=self.oversampling)
+        epsf, fitted, df = self._build(initial_epsf=custom_epsf)
+        assert epsf is not None
+        assert epsf.data.shape == (expected_size, expected_size)
+        assert np.isfinite(epsf.data).all()
+
+    def test_initial_epsf_stpsf_mocked(self, monkeypatch):
+        from unittest.mock import MagicMock
+        from astropy.io import fits
+
+        expected_size = self.cutout_size * self.oversampling
+        if expected_size % 2 == 0:
+            expected_size += 1
+        # Create mock HDUList that mimics stpsf.calc_psf
+        stpsf_fov_pixels = self.cutout_size * self.oversampling
+        mock_data = np.zeros((stpsf_fov_pixels, stpsf_fov_pixels), dtype=np.float64)
+        c = (stpsf_fov_pixels - 1) / 2.0
+        y, x = np.mgrid[:stpsf_fov_pixels, :stpsf_fov_pixels]
+        mock_data = np.exp(-((x - c) ** 2 + (y - c) ** 2) / 10.0)
+        mock_data /= mock_data.sum()
+
+        primary_hdu = fits.PrimaryHDU(data=mock_data)
+        hdul = fits.HDUList([primary_hdu])
+
+        mock_wfi = MagicMock()
+        mock_wfi.calc_psf.return_value = hdul
+        mock_roman = MagicMock()
+        mock_roman.WFI.return_value = mock_wfi
+
+        import sys
+        mock_stpsf = MagicMock()
+        mock_stpsf.roman = mock_roman
+        monkeypatch.setitem(sys.modules, "stpsf", mock_stpsf)
+        monkeypatch.setitem(sys.modules, "stpsf.roman", mock_roman)
+
+        epsf, fitted, df = self._build(
+            initial_epsf=True,
+            detector="WFI02",
+            filter_name="F158",
+        )
+        assert epsf is not None
+        assert epsf.data.shape == (expected_size, expected_size)
+        assert mock_wfi.detector == "WFI02"
+        assert mock_wfi.filter == "F158"
+
+    def test_initial_epsf_invalid_type(self):
+        with pytest.raises(TypeError, match="initial_epsf must be False, True, or an ImagePSF/EPSFModel instance"):
+            self._build(initial_epsf="invalid_model_type")
+
 
 
 class TestBuildGridEpsf:
@@ -136,7 +205,9 @@ class TestBuildGridEpsf:
             min_snr_pixels=3,
             min_stars_per_cell=1,
         )
-        expected_psf = self.cutout_size * self.oversampling - (self.oversampling - 1)
+        expected_psf = self.cutout_size * self.oversampling
+        if expected_psf % 2 == 0:
+            expected_psf += 1
         assert grid.data.shape == (2, 2, expected_psf, expected_psf)
 
     def test_star_counts_shape(self):
@@ -273,3 +344,50 @@ class TestFitsIO:
             assert np.array_equal(grid.star_counts, loaded_grid.star_counts)
         finally:
             path.unlink(missing_ok=True)
+
+
+class TestCreateStpsfEpsf:
+    def test_missing_stpsf_raises_import_error(self, monkeypatch):
+        import sys
+        monkeypatch.setitem(sys.modules, "stpsf", None)
+        with pytest.raises(ImportError, match="The 'stpsf' package is required"):
+            create_stpsf_epsf()
+
+    def test_create_stpsf_epsf_success(self, monkeypatch):
+        from unittest.mock import MagicMock
+        from astropy.io import fits
+        import sys
+
+        cutout_size = 15
+        oversampling = 3
+        expected_size = cutout_size * oversampling
+        if expected_size % 2 == 0:
+            expected_size += 1
+
+        raw_size = cutout_size * oversampling
+        mock_data = np.ones((raw_size, raw_size), dtype=np.float64)
+        hdul = fits.HDUList([fits.PrimaryHDU(data=mock_data)])
+
+        mock_wfi = MagicMock()
+        mock_wfi.calc_psf.return_value = hdul
+        mock_roman = MagicMock()
+        mock_roman.WFI.return_value = mock_wfi
+        mock_stpsf = MagicMock()
+        mock_stpsf.roman = mock_roman
+
+        monkeypatch.setitem(sys.modules, "stpsf", mock_stpsf)
+        monkeypatch.setitem(sys.modules, "stpsf.roman", mock_roman)
+
+        model = create_stpsf_epsf(
+            detector=4,
+            filter_name="F146",
+            oversampling=oversampling,
+            cutout_size=cutout_size,
+        )
+        assert isinstance(model, ImagePSF)
+        assert model.data.shape == (expected_size, expected_size)
+        assert np.isclose(model.data.sum(), 1.0)
+        assert mock_wfi.detector == "WFI04"
+        assert mock_wfi.filter == "F146"
+
+

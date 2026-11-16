@@ -60,6 +60,7 @@ from .photutils import (  # noqa: E402
     build_global_epsf,
     build_grid_epsf,
     build_multiepoch_epsf,
+    create_stpsf_epsf,
     load_epsf,
     save_epsf,
 )
@@ -83,6 +84,7 @@ __all__ = [
     "build_global_epsf",
     "build_grid_epsf",
     "build_multiepoch_epsf",
+    "create_stpsf_epsf",
     "save_epsf",
     "load_epsf",
     # psfmachine builders
