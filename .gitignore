@@ -6,3 +6,4 @@ tests/__pycache__
 
 # ignore notebooks till romcom goes public
 notebooks
+scripts/__pycache__
