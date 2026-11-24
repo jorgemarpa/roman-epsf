@@ -143,9 +143,6 @@ roman-epsf/
 │       ├── builder.py         # build_pixel_arrays, fit_epsf, evaluate_epsf, PSFMachineModel
 │       ├── _spline.py         # B-spline primitives (polar, clamped, periodic)
 │       └── io.py              # save_model, load_model, save_image
-├── notebooks/
-│   ├── demo_photutils_epsf.ipynb    # photutils workflow demo
-│   └── demo_psfmachine_epsf.ipynb  # PSFMachine workflow demo
 └── tests/
     ├── test_star_selection.py
     ├── test_builder.py        # photutils builders + FITS I/O

@@ -255,7 +255,7 @@ def _hdul_to_grid(hdul: fits.HDUList) -> GridEPSF:
     star_counts = np.asarray(geom_hdu.data["star_counts"][0], dtype=int).reshape(n_grid_y, n_grid_x)
 
     # Determine PSF array shape from the first cell HDU
-    first_cell = hdul[f"CELL_0_0"]
+    first_cell = hdul["CELL_0_0"]
     psf_h, psf_w = first_cell.data.shape
 
     epsf_data = np.zeros((n_grid_y, n_grid_x, psf_h, psf_w), dtype=np.float64)
