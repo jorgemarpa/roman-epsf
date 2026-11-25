@@ -24,7 +24,6 @@ from roman_epsf.psfmachine._spline import (
     _wrapped_spline_matrix,
 )
 
-
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -293,7 +292,7 @@ class TestBuildPixelArrays:
 class TestFitEpsf:
     def setup_method(self):
         """Build a realistic pixel array from a synthetic Gaussian PSF field."""
-        rng = np.random.default_rng(42)
+        _ = np.random.default_rng(42)
         self.image, self.catalog = _make_synthetic_image_and_catalog(seed=42)
         from roman_epsf.star_selection import select_stars
         self.selected = select_stars(

@@ -7,3 +7,11 @@ tests/__pycache__
 # ignore notebooks till romcom goes public
 notebooks
 scripts/__pycache__
+
+# uv
+.venv/
+dist/
+site/
+.ruff_cache/
+.mypy_cache/
+

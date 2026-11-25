@@ -15,7 +15,13 @@ Public API
 * :class:`PSFMachineModel` — dataclass holding the fitted model.
 """
 
-from .builder import PSFMachineModel, build_pixel_arrays, evaluate_epsf, fit_epsf, refine_centroids
+from .builder import (
+    PSFMachineModel,
+    build_pixel_arrays,
+    evaluate_epsf,
+    fit_epsf,
+    refine_centroids,
+)
 from .io import load_model, save_image, save_model
 
 __all__ = [

@@ -6,7 +6,6 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import pytest
-
 from photutils.psf import ImagePSF
 
 from roman_epsf import (
@@ -18,7 +17,6 @@ from roman_epsf import (
     load_epsf,
     save_epsf,
 )
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -124,6 +122,7 @@ class TestBuildGlobalEpsf:
 
     def test_initial_epsf_stpsf_mocked(self, monkeypatch):
         from unittest.mock import MagicMock
+
         from astropy.io import fits
 
         expected_size = self.cutout_size * self.oversampling
@@ -354,9 +353,10 @@ class TestCreateStpsfEpsf:
             create_stpsf_epsf()
 
     def test_create_stpsf_epsf_success(self, monkeypatch):
-        from unittest.mock import MagicMock
-        from astropy.io import fits
         import sys
+        from unittest.mock import MagicMock
+
+        from astropy.io import fits
 
         cutout_size = 15
         oversampling = 3
