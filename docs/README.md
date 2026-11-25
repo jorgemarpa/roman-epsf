@@ -6,15 +6,28 @@
 
 # roman-epsf
 
-`roman-epsf` provides effective Point Spread Function (ePSF) modeling algorithms tailored for the **Nancy Grace Roman Space Telescope Wide Field Instrument (WFI)**. It provides two pluggable, high-precision algorithms for constructing empirical and semi-analytical ePSFs from calibrated Roman WFI exposures, backed by a robust star-selection layer for both sparse and dense fields.
+`roman-epsf` provides effective Point Spread Function (ePSF) modeling algorithms tailored for the **Nancy Grace Roman Space Telescope Wide Field Instrument (WFI)**. It provides two pluggable, high-precision algorithms for constructing empirical and semi-analytical ePSFs from calibrated Roman WFI exposures.
 
 ---
 
 ## About NASA Roman & the Galactic Bulge Time Domain Survey
 
-The **Nancy Grace Roman Space Telescope** is NASA's next-generation flagship observatory, engineered to explore the infrared universe with unprecedented speed and precision. Its primary imaging camera, the **Wide Field Instrument (WFI)**, combines 18 Sensor Chip Assemblies (SCAs) totaling 300 megapixels to yield a 0.281 deg² field of view—roughly 100 times that of the Hubble Space Telescope at comparable resolution (0.11 arcsec/pixel).
+The **Nancy Grace Roman Space Telescope** is NASA's new flagship observatory, engineered to explore the infrared universe with unprecedented speed and precision. Its primary imaging camera, the **Wide Field Instrument (WFI)**, combines 18 Sensor Chip Assemblies (SCAs) totaling 300 megapixels to yield a 0.281 deg² field of view—roughly 100 times that of the Hubble Space Telescope at comparable resolution (0.11 arcsec/pixel).
 
-A cornerstone community initiative of Roman is the **Galactic Bulge Time Domain Survey (GBTDS)**. By continuously monitoring ~2 square degrees in the dense, dust-obscured Milky Way bulge with ~15-minute sampling over six 62-day seasons in the near-infrared, the GBTDS will detect thousands of exoplanets via gravitational microlensing, discover stellar oscillations, and measure billions of stellar positions. In such extremely crowded stellar fields with detector undersampling and spatial/temporal variations, empirical ePSF modeling is crucial. `roman-epsf` generates the high-fidelity PSF models required by `roman-lcs` for precision photometry and astrometry.
+A cornerstone community initiative of Roman is the **Galactic Bulge Time Domain Survey (GBTDS)**. By continuously monitoring ~2 square degrees in the dense, dust-obscured Milky Way bulge with ~12-minute sampling over six 62-day seasons in the near-infrared, the GBTDS will detect tens of thousands of exoplanets via the transiting method, discover stellar oscillations, and measure billions of stellar positions.
+
+### The TRExS Project: Transits in the Roman Galactic EXoplanet Survey
+
+**TRExS** ([Transits in the Roman Galactic EXoplanet Survey](https://www.stsci.edu/contents/events/roman/2023/november/transits-in-the-roman-galactic-exoplanet-survey-trexs)) is a Wide Field Science initiative designed to maximize the transit science return from Roman's GBTDS. While the GBTDS is nominally optimized for gravitational microlensing, its high-cadence time-series imaging of hundreds of millions of stars toward the Galactic Center makes it one of the most powerful transiting exoplanet surveys ever conceived.
+
+Key pillars of TRExS include:
+- **Massive Exoplanet Yields:** TRExS is predicted to discover between **60,000 and 200,000 transiting exoplanets**, expanding the catalog of known exoplanets by orders of magnitude compared to Kepler and TESS.
+- **Statistical Demographics of Rare Systems:** The enormous sample size places stringent demographic constraints on intrinsically rare planetary architectures, ultra-short-period planets, planets orbiting evolved or giant stars, and brown dwarf companions.
+- **Galactic Depth & Diversity:** Probing deep through the Galactic disk into the inner bulge, TRExS observes stars across diverse stellar populations, metallicities, and Galactic environments, mapping how planet occurrence varies throughout the Milky Way.
+- **Near-Infrared Atmospheres:** Leveraging Roman's near-infrared bandpass (WFI F146 and companion filters), TRExS enables direct atmospheric detection and thermal emission measurements (e.g., secondary eclipses and phase curves) for thousands of transiting giant planets at a population level.
+- **Survey Synergy:** By pairing transit discoveries with microlensing detections in the same survey footprint, Roman and TRExS will establish a unified census of planetary systems spanning orbital separations from <0.1 AU out to free-floating planets.
+
+Within the TRExS software ecosystem, `roman-epsf` generates the high-fidelity empirical and semi-analytical effective PSF (ePSF) models required by `roman-lcs` for precision crowded-field photometry.
 
 ---
 
