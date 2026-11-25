@@ -3489,7 +3489,7 @@ wheels = [
 [[package]]
 name = "roman-cuts"
 version = "1.0.0"
-source = { git = "https://github.com/jorgemarpa/roman-cuts.git?branch=chore%2Fuv-cleanup#b3a0f80a298fcba00dd757e164402e9ecd80abbe" }
+source = { git = "https://github.com/jorgemarpa/roman-cuts.git#166e5b6e8865e3c60d01296d8e6c31f8ae9ac046" }
 dependencies = [
     { name = "asdf-astropy" },
     { name = "astropy" },
@@ -3572,7 +3572,7 @@ requires-dist = [
     { name = "numpy", specifier = ">=1.26,<2.5" },
     { name = "pandas", specifier = ">1.5,<3.0" },
     { name = "photutils", specifier = ">=2.0" },
-    { name = "roman-cuts", extras = ["com"], git = "https://github.com/jorgemarpa/roman-cuts.git?branch=chore%2Fuv-cleanup" },
+    { name = "roman-cuts", extras = ["com"], git = "https://github.com/jorgemarpa/roman-cuts.git" },
     { name = "roman-datamodels", marker = "extra == 'all'", specifier = ">=1.0.0,<2.0" },
     { name = "roman-datamodels", marker = "extra == 'dq'", specifier = ">=1.0.0,<2.0" },
     { name = "scipy", specifier = ">=1.10" },

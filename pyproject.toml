@@ -35,7 +35,7 @@ dev = [
 ]
 
 [tool.uv.sources]
-roman-cuts = { git = "https://github.com/jorgemarpa/roman-cuts.git", branch = "chore/uv-cleanup" }
+roman-cuts = { git = "https://github.com/jorgemarpa/roman-cuts.git"}
 astroquery = { git = "https://github.com/astropy/astroquery.git", rev = "refs/pull/3593/head" }
 
 [build-system]
